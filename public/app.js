@@ -385,6 +385,17 @@ async function renderConfig() {
       </div>
     </section>
 
+
+    <section class="card" id="import-card">
+      <div class="section-head"><h2>Importar vendas antigas</h2></div>
+      <p class="help">Exporte as vendas na Hubla e na TMB em <b>CSV</b> (se vier .xlsx, abra no Excel ou Google Planilhas e salve como CSV) e suba aqui, uma plataforma por vez. Vendas que já existem (mesmo nº de pedido/fatura) não duplicam. As vendas entram com a mesma atribuição de UTM e planilha.</p>
+      <div class="row">
+        <div class="seg" id="imp-platform"><button data-v="hubla" class="on">Hubla</button><button data-v="tmb">TMB</button></div>
+        <input type="file" id="imp-file" accept=".csv,.txt,text/csv">
+      </div>
+      <div id="imp-preview"></div>
+    </section>
+
     <section class="card">
       <div class="section-head"><h2>Últimos webhooks recebidos</h2><button class="ghost small" id="reload-ev">Atualizar</button></div>
       ${events.length ? `<div class="table-wrap"><table><thead><tr><th>Quando</th><th>Plataforma</th><th>Evento</th><th>Resultado</th><th></th></tr></thead><tbody>
@@ -420,6 +431,148 @@ async function renderConfig() {
     renderConfig();
   };
   $('#reload-ev').onclick = renderConfig;
+  bindImport();
+}
+
+/* ------------------------------- importação CSV ------------------------------- */
+const normH = (h) => String(h ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const IMP_FIELDS = [
+  ['external_id', 'Nº do pedido / fatura', ['id da fatura', 'id fatura', 'fatura', 'pedido', 'id do pedido', 'numero do pedido', 'n do pedido', 'id da venda', 'id da transacao', 'transacao', 'invoice id', 'order id', 'codigo', 'id']],
+  ['status', 'Status', ['status do pedido', 'status da fatura', 'status do pagamento', 'status pedido', 'status', 'situacao']],
+  ['customer_name', 'Nome', ['nome do cliente', 'nome do comprador', 'nome completo', 'cliente', 'comprador', 'nome']],
+  ['email', 'E-mail', ['email do cliente', 'email do comprador', 'e mail do cliente', 'e mail', 'email']],
+  ['phone', 'Telefone', ['telefone do cliente', 'telefone do comprador', 'telefone ativo', 'celular', 'whatsapp', 'telefone', 'telefones', 'fone']],
+  ['product', 'Produto', ['nome do produto', 'produto', 'oferta', 'lancamento', 'titulo']],
+  ['amount', 'Valor', ['valor principal', 'valor total', 'valor pago', 'valor da venda', 'valor bruto', 'total', 'valor', 'preco']],
+  ['sold_at', 'Data', ['data de pagamento', 'data do pagamento', 'data efetivado', 'data efetivacao', 'pago em', 'data da venda', 'data da compra', 'data de criacao', 'criado em', 'data']],
+  ['vendor_hint', 'Vendedor', ['vendedor']],
+];
+const imp = { platform: 'hubla', headers: [], rows: [], map: {} };
+
+function parseCsvText(text) {
+  text = text.replace(/^\uFEFF/, '');
+  const first = text.split(/\r?\n/, 1)[0] || '';
+  const delim = [';', ',', '\t'].map((d) => [d, first.split(d).length]).sort((a, b) => b[1] - a[1])[0][0];
+  const rows = []; let row = [], cur = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (q) {
+      if (ch === '"' && text[i + 1] === '"') { cur += '"'; i++; } else if (ch === '"') q = false; else cur += ch;
+    } else if (ch === '"') q = true;
+    else if (ch === delim) { row.push(cur); cur = ''; }
+    else if (ch === '\n') { row.push(cur); rows.push(row); row = []; cur = ''; }
+    else if (ch !== '\r') cur += ch;
+  }
+  if (cur !== '' || row.length) { row.push(cur); rows.push(row); }
+  return rows.filter((r) => r.some((c) => String(c).trim() !== ''));
+}
+
+function detectMap(headers) {
+  const hs = headers.map(normH), used = new Set(), map = {};
+  for (const [key, , cands] of IMP_FIELDS) {
+    let found = -1;
+    for (const c of cands) { found = hs.findIndex((h, i) => !used.has(i) && h === c); if (found >= 0) break; }
+    if (found < 0) for (const c of cands) { found = hs.findIndex((h, i) => !used.has(i) && (' ' + h + ' ').includes(' ' + c + ' ') && !h.includes('utm')); if (found >= 0) break; }
+    map[key] = found;
+    if (found >= 0) used.add(found);
+  }
+  return map;
+}
+
+function mapStatus(v, hasCol) {
+  if (!hasCol) return 'aprovada';
+  const n = normH(v);
+  if (!n) return null;
+  if (/(nao pag|unpaid|pendent|aguard|abert|expir|falh|recus|fail|draft|vencid|gerad|waiting|pending)/.test(n)) return null;
+  if (/(reembols|estorn|refund|devolv)/.test(n)) return 'reembolsada';
+  if (/(cancel|chargeback|contest|disput)/.test(n)) return 'cancelada';
+  if (/(pag|paid|aprov|efetiv|conclu|complet|confirm|sucesso|succe|ativ|liquid)/.test(n)) return 'aprovada';
+  return null;
+}
+function parseMoney(v) {
+  let s = String(v ?? '').replace(/[^\d,.-]/g, '');
+  if (!s) return 0;
+  if (s.includes(',') && s.lastIndexOf(',') > s.lastIndexOf('.')) s = s.replace(/\./g, '').replace(',', '.');
+  else s = s.replace(/,/g, '');
+  return parseFloat(s) || 0;
+}
+
+function buildImportRows() {
+  const m = imp.map, get = (r, k) => (m[k] >= 0 ? String(r[m[k]] ?? '').trim() : '');
+  const utmCols = imp.headers.map((h, i) => [normH(h), i]).filter(([h]) => h.includes('utm') || h === 'src' || h === 'sck');
+  return imp.rows.map((r) => {
+    const utms = {};
+    for (const [h, i] of utmCols) if (String(r[i] ?? '').trim()) utms[h.replace(/ /g, '_')] = String(r[i]).trim();
+    const date = get(r, 'sold_at').replace(/\s+(às|as)\s+/i, ' ');
+    const email = get(r, 'email'), amount = parseMoney(get(r, 'amount'));
+    return {
+      external_id: get(r, 'external_id') || (email ? `${email}|${date}|${amount}` : ''),
+      status: mapStatus(get(r, 'status'), m.status >= 0),
+      customer_name: get(r, 'customer_name'), email, phone: get(r, 'phone'),
+      product: get(r, 'product'), amount, sold_at: date, utms, vendor_hint: get(r, 'vendor_hint'),
+      _rawStatus: get(r, 'status'),
+    };
+  });
+}
+
+function renderImportPreview() {
+  const box = $('#imp-preview');
+  if (!imp.headers.length) { box.innerHTML = ''; return; }
+  const rows = buildImportRows();
+  const ok = rows.filter((r) => r.status && r.external_id);
+  const cnt = (st) => rows.filter((r) => r.status === st && r.external_id).length;
+  const skipped = rows.length - ok.length;
+  const opts = (sel) => `<option value="-1">— nenhuma —</option>` + imp.headers.map((h, i) => `<option value="${i}" ${i === sel ? 'selected' : ''}>${esc(h)}</option>`).join('');
+  const utmCols = imp.headers.filter((h) => { const n = normH(h); return n.includes('utm') || n === 'src' || n === 'sck'; });
+  const ignoredStatus = [...new Set(rows.filter((r) => !r.status).map((r) => r._rawStatus).filter(Boolean))].slice(0, 6);
+  box.innerHTML = `
+    <p class="help" style="margin-top:14px">${int(rows.length)} linhas no arquivo. Confira se cada campo puxou a coluna certa:</p>
+    <div class="form-grid">${IMP_FIELDS.map(([k, label]) => `<label>${label}<select data-map="${k}">${opts(imp.map[k])}</select></label>`).join('')}</div>
+    <p class="help">UTMs: ${utmCols.length ? utmCols.map((h) => `<code>${esc(h)}</code>`).join(' ') : '<span style="color:var(--warn)">nenhuma coluna de UTM encontrada. A atribuição vai ser só pela planilha.</span>'}</p>
+    <div class="table-wrap"><table><thead><tr><th>Pedido</th><th>Status</th><th>Data</th><th>Cliente</th><th>E-mail</th><th class="num">Valor</th></tr></thead><tbody>
+      ${rows.slice(0, 6).map((r) => `<tr class="${r.status ? '' : 'off'}"><td class="mono">${esc(r.external_id.slice(0, 24))}</td><td>${esc(r.status || 'ignorar')}${r._rawStatus ? ` <span class="muted">(${esc(r._rawStatus)})</span>` : ''}</td><td>${esc(r.sold_at)}</td><td>${esc(r.customer_name)}</td><td>${esc(r.email)}</td><td class="num">${brl(r.amount)}</td></tr>`).join('')}
+    </tbody></table></div>
+    <p class="help">Vai importar <b>${int(cnt('aprovada'))}</b> aprovadas, ${int(cnt('cancelada'))} canceladas e ${int(cnt('reembolsada'))} reembolsadas. ${skipped ? `${int(skipped)} linhas serão ignoradas (pendentes/expiradas ou sem nº do pedido)${ignoredStatus.length ? ': ' + ignoredStatus.map(esc).join(', ') : ''}.` : ''}</p>
+    <div class="row"><button class="primary" id="imp-go" ${ok.length ? '' : 'disabled'}>Importar ${int(ok.length)} vendas da ${imp.platform === 'hubla' ? 'Hubla' : 'TMB'}</button><span class="muted" id="imp-status"></span></div>`;
+  $$('[data-map]', box).forEach((sel) => (sel.onchange = () => { imp.map[sel.dataset.map] = Number(sel.value); renderImportPreview(); }));
+  $('#imp-go').onclick = async (e) => {
+    e.target.disabled = true;
+    const send = ok.map(({ _rawStatus, ...r }) => r);
+    const tot = { created: 0, updated: 0, duplicate: 0, skipped: 0, errors: [] };
+    try {
+      for (let i = 0; i < send.length; i += 1000) {
+        $('#imp-status').textContent = `Enviando ${Math.min(i + 1000, send.length)} de ${send.length}…`;
+        const r = await api('/api/admin/import', { method: 'POST', body: { platform: imp.platform, rows: send.slice(i, i + 1000) } });
+        for (const k of ['created', 'updated', 'duplicate', 'skipped']) tot[k] += r[k];
+        tot.errors.push(...r.errors);
+      }
+      $('#imp-status').innerHTML = `<span class="ok">Pronto:</span> ${tot.created} novas · ${tot.updated} status atualizados · ${tot.duplicate} já existiam${tot.errors.length ? ' · erros: ' + esc(tot.errors.join('; ')) : ''}`;
+      toast('Importação concluída', `${tot.created} vendas novas da ${imp.platform.toUpperCase()}`);
+    } catch (err) {
+      $('#imp-status').innerHTML = `<span class="err">${esc(err.message)}</span>`;
+      e.target.disabled = false;
+    }
+  };
+}
+
+function bindImport() {
+  $$('#imp-platform button').forEach((b) => (b.onclick = () => {
+    imp.platform = b.dataset.v;
+    $$('#imp-platform button').forEach((x) => x.classList.toggle('on', x === b));
+    renderImportPreview();
+  }));
+  $('#imp-file').onchange = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    if (/\.xlsx?$/i.test(f.name)) { toast('Arquivo em Excel', 'Salve como CSV e suba de novo', true); return; }
+    let text = await f.text();
+    if (text.includes('\uFFFD')) text = new TextDecoder('windows-1252').decode(await f.arrayBuffer());
+    const all = parseCsvText(text);
+    imp.headers = all[0] || [];
+    imp.rows = all.slice(1);
+    imp.map = detectMap(imp.headers);
+    renderImportPreview();
+  };
 }
 
 /* ------------------------------- boot ------------------------------- */

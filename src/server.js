@@ -2,11 +2,11 @@ import express from 'express';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { db, getSettings, saveSettings } from './db.js';
+import { db, tx, getSettings, saveSettings } from './db.js';
 import { normalizeHubla, normalizeTmb } from './normalize.js';
 import { attribute, buildIndex, reattributeAll } from './attribution.js';
 import { syncSheets, syncState, sheetsConfigured, serviceAccountEmail } from './sheets.js';
-import { norm, slugify, dayKey, dayStartIso, addDays, nowIso } from './util.js';
+import { norm, slugify, dayKey, dayStartIso, addDays, nowIso, parseDate } from './util.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 3000);
@@ -17,7 +17,7 @@ const SYNC_SECONDS = Math.max(30, Number(process.env.SYNC_INTERVAL_SECONDS || 12
 
 const app = express();
 app.set('trust proxy', true);
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
 /* --------------------------------- auth --------------------------------- */
@@ -83,21 +83,24 @@ const insertSale = db.prepare(`INSERT INTO sales
   (platform, external_id, status, customer_name, email, phone, product, amount, sold_at, utms, vendor_hint, seller_slug, seller_source, seller_note, created_at, updated_at)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 
-function upsertSale(sale) {
+function upsertSale(sale, opts = {}) {
   const ex = db.prepare('SELECT * FROM sales WHERE platform = ? AND external_id = ?').get(sale.platform, sale.external_id);
   const now = nowIso();
   if (!ex) {
-    const a = attribute({ ...sale, utms: sale.utms }, buildIndex());
+    const a = attribute({ ...sale, utms: sale.utms }, opts.idx || buildIndex());
     const r = insertSale.run(
       sale.platform, sale.external_id, sale.status, sale.customer_name, sale.email, sale.phone, sale.product,
       sale.amount, sale.sold_at, JSON.stringify(sale.utms || {}), sale.vendor_hint, a.slug, a.source, a.note, now, now,
     );
+    if (opts.silent) return { created: true, seller: a.slug, source: a.source };
     const seller = a.slug ? db.prepare('SELECT name FROM sellers WHERE slug = ?').get(a.slug)?.name : null;
     broadcast('sale', { id: Number(r.lastInsertRowid), status: sale.status, platform: sale.platform, customer: sale.customer_name, amount: sale.amount, seller });
     return { created: true, seller: a.slug, source: a.source };
   }
-  if (ex.status !== sale.status) {
+  // Na importação, um arquivo antigo não pode reativar venda que já foi cancelada/reembolsada
+  if (ex.status !== sale.status && !(opts.noRevive && sale.status === 'aprovada')) {
     db.prepare('UPDATE sales SET status = ?, updated_at = ? WHERE id = ?').run(sale.status, now, ex.id);
+    if (opts.silent) return { updated: true, status: sale.status };
     broadcast('sale', { id: ex.id, status: sale.status, platform: sale.platform, customer: ex.customer_name, amount: ex.amount });
     return { updated: true, status: sale.status };
   }
@@ -347,6 +350,48 @@ app.patch('/api/admin/sales/:id', needAdmin, (req, res) => {
   }
   broadcast('refresh');
   res.json({ ok: true });
+});
+
+// Importação de vendas antigas (linhas já mapeadas no navegador a partir do CSV exportado)
+app.post('/api/admin/import', needAdmin, (req, res) => {
+  const platform = String(req.body?.platform || '');
+  if (!['hubla', 'tmb'].includes(platform)) return res.status(400).json({ error: 'Escolha Hubla ou TMB' });
+  const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+  if (!rows.length) return res.status(400).json({ error: 'Nenhuma linha para importar' });
+  const idx = buildIndex();
+  const out = { created: 0, updated: 0, duplicate: 0, skipped: 0, errors: [] };
+  tx(() => {
+    rows.forEach((r, i) => {
+      try {
+        if (!['aprovada', 'cancelada', 'reembolsada'].includes(r.status)) { out.skipped++; return; }
+        const externalId = String(r.external_id || '').trim();
+        if (!externalId) { out.skipped++; return; }
+        const amount = Number(r.amount);
+        const sale = {
+          platform,
+          external_id: externalId,
+          status: r.status,
+          customer_name: r.customer_name ? String(r.customer_name).slice(0, 200) : null,
+          email: r.email ? String(r.email).trim().slice(0, 200) : null,
+          phone: r.phone ? String(r.phone).slice(0, 40) : null,
+          product: r.product ? String(r.product).slice(0, 200) : null,
+          amount: Number.isFinite(amount) ? amount : 0,
+          sold_at: parseDate(r.sold_at) || nowIso(),
+          utms: r.utms && typeof r.utms === 'object' ? r.utms : {},
+          vendor_hint: r.vendor_hint ? String(r.vendor_hint).slice(0, 100) : null,
+        };
+        const result = upsertSale(sale, { idx, silent: true, noRevive: true });
+        if (result.created) out.created++;
+        else if (result.updated) out.updated++;
+        else out.duplicate++;
+      } catch (e) {
+        if (out.errors.length < 10) out.errors.push(`linha ${i + 2}: ${e.message}`);
+      }
+    });
+  });
+  logEvent(platform, 'importação CSV', out, { linhas: rows.length });
+  broadcast('refresh');
+  res.json(out);
 });
 
 app.get('/api/admin/events', needAdmin, (req, res) => {

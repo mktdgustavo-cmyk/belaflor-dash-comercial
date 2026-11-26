@@ -84,6 +84,14 @@ Duplicados são ignorados (Hubla pelo id da fatura, TMB pelo número do pedido).
 
 ---
 
+## Importar vendas que já aconteceram
+
+Config → **Importar vendas antigas**: escolha Hubla ou TMB e suba o **CSV** exportado da plataforma (se vier .xlsx, salve como CSV). O dash detecta as colunas sozinho (nº do pedido/fatura, status, nome, e-mail, telefone, produto, valor, data e UTMs), mostra uma prévia pra conferir e importa.
+
+- Mesmo nº de pedido/fatura não duplica, então dá pra reimportar sem medo, inclusive depois que os webhooks já estiverem ligados.
+- Pendentes/expiradas são ignoradas; canceladas e reembolsadas entram, mas não contam.
+- Um arquivo antigo nunca reativa uma venda que já foi cancelada depois.
+
 ## Testar na mão
 
 ```bash
