@@ -39,7 +39,7 @@ Se o mesmo contato estiver na planilha de duas pessoas, a venda fica com quem ca
    | `SESSION_SECRET` | sim | qualquer texto aleatório longo |
    | `HUBLA_TOKEN` | recomendado | Hubla Token (vem no header `x-hubla-token`) |
    | `TMB_TOKEN` | recomendado | valor da chave que você cadastrar no webhook da TMB |
-   | `DRIVE_FOLDER_ID` | sim* | `1lYFDH6F_tge4ZdJhKx9b7pp_bkotiwE3` |
+   | `DRIVE_FOLDER_ID` | sim* | ID da pasta do Drive (o trecho depois de `/folders/` no link) |
    | `GOOGLE_SERVICE_ACCOUNT_JSON` | sim* | JSON da conta de serviço (inteiro ou em base64) |
    | `SYNC_INTERVAL_SECONDS` | não | de quanto em quanto tempo relê as planilhas (padrão 120) |
 
