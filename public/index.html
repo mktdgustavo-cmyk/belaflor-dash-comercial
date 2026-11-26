@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dash Comercial</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="live" id="live" title="Conectado — atualiza sozinho"></span>
+      <h1 id="title">Dash Comercial</h1>
+    </div>
+    <nav id="nav">
+      <a href="#/" data-route="geral">Geral</a>
+      <a href="#/vendedor" data-route="vendedor">Vendedores</a>
+      <a href="#/config" data-route="config" id="nav-config" hidden>Config</a>
+    </nav>
+    <div class="period" id="period">
+      <div class="seg" role="group" aria-label="Período">
+        <button data-p="campanha" class="on">Campanha</button>
+        <button data-p="hoje">Hoje</button>
+        <button data-p="custom">Datas</button>
+      </div>
+      <span class="custom" id="custom" hidden>
+        <input type="date" id="from" /> <span class="muted">até</span> <input type="date" id="to" />
+      </span>
+      <button class="ghost" id="login-btn" title="Entrar como admin">⚙</button>
+    </div>
+  </header>
+
+  <main id="app"><div class="loading">Carregando…</div></main>
+
+  <div id="toasts" aria-live="polite"></div>
+
+  <dialog id="login">
+    <form method="dialog" id="login-form">
+      <h3>Entrar</h3>
+      <p class="muted" id="login-msg">Digite a senha de acesso.</p>
+      <input type="password" id="pwd" placeholder="Senha" autocomplete="current-password" required />
+      <p class="err" id="login-err"></p>
+      <div class="row end">
+        <button type="button" class="ghost" id="login-cancel">Cancelar</button>
+        <button type="submit" class="primary">Entrar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/app.js"></script>
+</body>
+</html>
