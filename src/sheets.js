@@ -103,13 +103,21 @@ function parseCsv(text) {
 }
 
 async function listFromPublic() {
-  const out = [];
+  const out = [], failed = [];
   for (const part of process.env.PUBLIC_SHEETS.split(/[;\n]/).map((s) => s.trim()).filter(Boolean)) {
     const [name, id] = part.split('=').map((s) => s.trim());
-    const r = await fetch(`https://docs.google.com/spreadsheets/d/${id}/export?format=csv`);
-    if (!r.ok) throw new Error(`Planilha de ${name} não abriu (HTTP ${r.status}). Ela está compartilhada por link?`);
-    out.push({ name: titleCase(name), sheetId: id, rows: parseCsv(await r.text()) });
+    try {
+      const r = await fetch(`https://docs.google.com/spreadsheets/d/${id}/export?format=csv`);
+      const text = await r.text();
+      if (!r.ok || /^\s*</.test(text)) throw new Error(`HTTP ${r.status}`);
+      out.push({ name: titleCase(name), sheetId: id, rows: parseCsv(text) });
+    } catch (e) {
+      failed.push(`${titleCase(name)} (${e.message})`);
+    }
   }
+  syncState.failed = failed;
+  if (failed.length) console.error(`[sheets] não abriram (não estão como "qualquer pessoa com o link"): ${failed.join(', ')}`);
+  if (!out.length) throw new Error(`Nenhuma planilha abriu sem login: ${failed.join(', ')}`);
   return out;
 }
 

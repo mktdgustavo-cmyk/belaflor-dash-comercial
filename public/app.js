@@ -374,6 +374,7 @@ async function renderConfig() {
           ${sync.serviceAccount ? `Compartilhe a pasta com: <code>${esc(sync.serviceAccount)}</code><br>` : ''}
           Última leitura: ${sync.lastSync ? dt(sync.lastSync) + ` · ${sync.sheets} planilhas · ${sync.contacts} contatos` : '—'}<br>
           ${sync.lastError ? `<span class="err">Erro: ${esc(sync.lastError)}</span>` : sync.lastSync ? '<span class="ok">OK</span>' : ''}
+          ${sync.failed && sync.failed.length ? `<br><span style="color:var(--warn)">Não abriram sem login: ${esc(sync.failed.join(', '))}</span>` : ''}
         </p>
       </div>
       <div class="card">
