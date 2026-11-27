@@ -370,7 +370,7 @@ async function renderConfig() {
       <div class="card">
         <div class="section-head"><h2>Planilhas</h2><button class="ghost" id="sync">Sincronizar agora</button></div>
         <p class="help">
-          ${sync.configured ? `Modo: <b>${sync.configured === 'drive' ? 'pasta do Drive (conta de serviço)' : 'planilhas públicas'}</b> · lê a cada ${sync.interval}s<br>` : '<b style="color:var(--warn)">Não configurado.</b> Veja o README (GOOGLE_SERVICE_ACCOUNT_JSON + DRIVE_FOLDER_ID).<br>'}
+          ${sync.configured ? `Modo: <b>${({ script: 'Apps Script', drive: 'pasta do Drive (conta de serviço)', public: 'planilhas públicas' })[sync.configured]}</b> · lê a cada ${sync.interval}s<br>` : '<b style="color:var(--warn)">Não configurado.</b> Veja o README (SHEETS_SCRIPT_URL + SHEETS_SCRIPT_KEY).<br>'}
           ${sync.serviceAccount ? `Compartilhe a pasta com: <code>${esc(sync.serviceAccount)}</code><br>` : ''}
           Última leitura: ${sync.lastSync ? dt(sync.lastSync) + ` · ${sync.sheets} planilhas · ${sync.contacts} contatos` : '—'}<br>
           ${sync.lastError ? `<span class="err">Erro: ${esc(sync.lastError)}</span>` : sync.lastSync ? '<span class="ok">OK</span>' : ''}

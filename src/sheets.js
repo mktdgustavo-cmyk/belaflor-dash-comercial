@@ -113,7 +113,24 @@ async function listFromPublic() {
   return out;
 }
 
+// Modo 3 (sem Google Cloud): Web App do Apps Script na conta de quem tem acesso à pasta
+async function listFromScript() {
+  const url = new URL(process.env.SHEETS_SCRIPT_URL);
+  if (process.env.SHEETS_SCRIPT_KEY) url.searchParams.set('key', process.env.SHEETS_SCRIPT_KEY);
+  const r = await fetch(url, { redirect: 'follow' });
+  const text = await r.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(`O Apps Script não devolveu JSON (HTTP ${r.status}). Confira se foi implantado como app da Web com acesso "Qualquer pessoa".`);
+  }
+  if (data.error) throw new Error(`Apps Script: ${data.error}`);
+  return (data.sheets || []).map((sh) => ({ name: sellerNameFromTitle(sh.name), sheetId: sh.id, rows: sh.rows || [] }));
+}
+
 export function sheetsConfigured() {
+  if (process.env.SHEETS_SCRIPT_URL) return 'script';
   if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON && process.env.DRIVE_FOLDER_ID) return 'drive';
   if (process.env.PUBLIC_SHEETS) return 'public';
   return null;
@@ -125,7 +142,7 @@ export async function syncSheets() {
   syncState.mode = mode;
   if (!mode) return { ok: false, error: 'Planilhas não configuradas' };
   try {
-    const sheets = mode === 'drive' ? await listFromDrive() : await listFromPublic();
+    const sheets = mode === 'script' ? await listFromScript() : mode === 'drive' ? await listFromDrive() : await listFromPublic();
     let contacts = 0;
     tx(() => {
       db.exec('DELETE FROM contacts');
@@ -144,6 +161,7 @@ export async function syncSheets() {
       }
     });
     Object.assign(syncState, { lastSync: nowIso(), lastError: null, sheets: sheets.length, contacts });
+    if (syncState.contacts !== syncState._lastLogged) { console.log(`[sheets] ${sheets.length} planilhas lidas, ${contacts} contatos`); syncState._lastLogged = contacts; }
     return { ok: true, sheets: sheets.length, contacts };
   } catch (e) {
     authClient = null;

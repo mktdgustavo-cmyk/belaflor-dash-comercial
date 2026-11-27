@@ -60,7 +60,9 @@ Se o mesmo contato estiver na planilha de duas pessoas, a venda fica com quem ca
 
 O dash lê **todas** as planilhas da pasta, tira o nome da pessoa do título (`… | COMERCIAL JÉSSICA` → Jéssica) e cria a vendedora sozinho. Planilha nova na pasta = vendedora nova no dash. As colunas podem vir fora de ordem ou faltando (ex.: sem e-mail): ele reconhece e-mail, telefone, data e HUBLA/TMB pelo conteúdo.
 
-**Alternativa sem Google Cloud:** deixe as planilhas como "qualquer pessoa com o link pode ver" e use
+**Alternativa sem Google Cloud (Apps Script):** crie um Web App no script.google.com com a conta que tem acesso à pasta, que devolva `{sheets:[{id,name,rows}]}` em JSON, e preencha `SHEETS_SCRIPT_URL` (+ `SHEETS_SCRIPT_KEY`, enviada como `?key=`).
+
+**Alternativa com planilhas abertas:** deixe as planilhas como "qualquer pessoa com o link pode ver" e use
 `PUBLIC_SHEETS=Ana=ID_DA_PLANILHA;Isla=ID_DA_PLANILHA;...` no lugar das duas variáveis acima.
 
 ---
