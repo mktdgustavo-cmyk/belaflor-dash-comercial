@@ -443,9 +443,9 @@ const IMP_FIELDS = [
   ['email', 'E-mail', ['email do cliente', 'email do comprador', 'e mail do cliente', 'e mail', 'email']],
   ['phone', 'Telefone', ['telefone do cliente', 'telefone do comprador', 'telefone ativo', 'celular', 'whatsapp', 'telefone', 'telefones', 'fone']],
   ['product', 'Produto', ['nome do produto', 'produto', 'oferta', 'lancamento', 'titulo']],
-  ['amount', 'Valor', ['valor principal', 'valor total', 'valor pago', 'valor da venda', 'valor bruto', 'total', 'valor', 'preco']],
+  ['amount', 'Valor', ['valor principal', 'valor do produto', 'valor total', 'valor pago', 'valor da venda', 'valor bruto', 'ticket do pedido', 'ticket', 'total', 'valor', 'preco']],
   ['sold_at', 'Data', ['data de pagamento', 'data do pagamento', 'data efetivado', 'data efetivacao', 'pago em', 'data da venda', 'data da compra', 'data de criacao', 'criado em', 'data']],
-  ['vendor_hint', 'Vendedor', ['vendedor']],
+  ['vendor_hint', 'Vendedor / afiliado', ['vendedor', 'nome do afiliado', 'afiliado']],
 ];
 const imp = { platform: 'hubla', headers: [], rows: [], map: {} };
 
@@ -486,7 +486,7 @@ function mapStatus(v, hasCol) {
   if (/(nao pag|unpaid|pendent|aguard|abert|expir|falh|recus|fail|draft|vencid|gerad|waiting|pending)/.test(n)) return null;
   if (/(reembols|estorn|refund|devolv)/.test(n)) return 'reembolsada';
   if (/(cancel|chargeback|contest|disput)/.test(n)) return 'cancelada';
-  if (/(pag|paid|aprov|efetiv|conclu|complet|confirm|sucesso|succe|ativ|liquid)/.test(n)) return 'aprovada';
+  if (/(pag|paid|aprov|efetiv|conclu|complet|confirm|sucesso|succe|ativ|liquid|em dia|vigente|adimplent)/.test(n)) return 'aprovada';
   return null;
 }
 function parseMoney(v) {
@@ -500,14 +500,19 @@ function parseMoney(v) {
 function buildImportRows() {
   const m = imp.map, get = (r, k) => (m[k] >= 0 ? String(r[m[k]] ?? '').trim() : '');
   const utmCols = imp.headers.map((h, i) => [normH(h), i]).filter(([h]) => h.includes('utm') || h === 'src' || h === 'sck');
+  const hIdx = (name) => imp.headers.findIndex((h) => normH(h) === name);
+  const iParc = hIdx('parcela do parcelamento inteligente'), iTot = hIdx('total de parcelas do parcelamento inteligente');
   return imp.rows.map((r) => {
+    const parc = iParc >= 0 ? Number(r[iParc]) || 0 : 0, totParc = iTot >= 0 ? Number(r[iTot]) || 0 : 0;
     const utms = {};
     for (const [h, i] of utmCols) if (String(r[i] ?? '').trim()) utms[h.replace(/ /g, '_')] = String(r[i]).trim();
     const date = get(r, 'sold_at').replace(/\s+(às|as)\s+/i, ' ');
-    const email = get(r, 'email'), amount = parseMoney(get(r, 'amount'));
+    const email = get(r, 'email');
+    let amount = parseMoney(get(r, 'amount'));
+    if (parc === 1 && totParc > 1) amount = Math.round(amount * totParc * 100) / 100;
     return {
       external_id: get(r, 'external_id') || (email ? `${email}|${date}|${amount}` : ''),
-      status: mapStatus(get(r, 'status'), m.status >= 0),
+      status: parc > 1 ? null : mapStatus(get(r, 'status'), m.status >= 0),
       customer_name: get(r, 'customer_name'), email, phone: get(r, 'phone'),
       product: get(r, 'product'), amount, sold_at: date, utms, vendor_hint: get(r, 'vendor_hint'),
       _rawStatus: get(r, 'status'),
@@ -638,6 +643,8 @@ async function readXlsx(buf) {
       else if (t === 'inlineStr') val = byTag(c, 't').map((x) => x.textContent).join('');
       else if (t === 'b') val = v === '1' ? 'TRUE' : 'FALSE';
       else if (t === 'str' || t === 'e') val = v;
+      // data ISO gravada direto na célula (ex.: export da TMB) = horário de parede, ignora o "Z"
+      else if (t === 'd') val = v.replace('T', ' ').replace(/(\.\d+)?Z?$/, '');
       else if (v !== '' && dateStyles.has(s)) val = serialToText(Number(v));
       else val = v;
       row[c.getAttribute('r') ? colIdx(c.getAttribute('r')) : row.length] = val;
