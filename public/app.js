@@ -388,10 +388,10 @@ async function renderConfig() {
 
     <section class="card" id="import-card">
       <div class="section-head"><h2>Importar vendas antigas</h2></div>
-      <p class="help">Exporte as vendas na Hubla e na TMB em <b>CSV</b> (se vier .xlsx, abra no Excel ou Google Planilhas e salve como CSV) e suba aqui, uma plataforma por vez. Vendas que já existem (mesmo nº de pedido/fatura) não duplicam. As vendas entram com a mesma atribuição de UTM e planilha.</p>
+      <p class="help">Exporte as vendas na Hubla e na TMB em <b>XLSX ou CSV</b> e suba aqui, uma plataforma por vez. Vendas que já existem (mesmo nº de pedido/fatura) não duplicam. As vendas entram com a mesma atribuição de UTM e planilha.</p>
       <div class="row">
         <div class="seg" id="imp-platform"><button data-v="hubla" class="on">Hubla</button><button data-v="tmb">TMB</button></div>
-        <input type="file" id="imp-file" accept=".csv,.txt,text/csv">
+        <input type="file" id="imp-file" accept=".csv,.txt,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
       </div>
       <div id="imp-preview"></div>
     </section>
@@ -555,6 +555,98 @@ function renderImportPreview() {
   };
 }
 
+/* Leitor de .xlsx sem biblioteca: o arquivo é um zip de XMLs.
+   Descompacta com DecompressionStream e lê a 1ª aba (textos, números e datas). */
+async function unzip(buf) {
+  const dv = new DataView(buf), u8 = new Uint8Array(buf);
+  let eocd = -1;
+  for (let i = buf.byteLength - 22; i >= Math.max(0, buf.byteLength - 65557); i--) if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) throw new Error('não é um .xlsx válido');
+  const count = dv.getUint16(eocd + 10, true);
+  let p = dv.getUint32(eocd + 16, true);
+  const files = {}, dec = new TextDecoder();
+  for (let n = 0; n < count; n++) {
+    if (dv.getUint32(p, true) !== 0x02014b50) break;
+    const method = dv.getUint16(p + 10, true), csize = dv.getUint32(p + 20, true);
+    const nlen = dv.getUint16(p + 28, true), elen = dv.getUint16(p + 30, true), clen = dv.getUint16(p + 32, true);
+    const local = dv.getUint32(p + 42, true);
+    const name = dec.decode(u8.subarray(p + 46, p + 46 + nlen));
+    files[name] = { method, csize, local };
+    p += 46 + nlen + elen + clen;
+  }
+  return async (name) => {
+    const e = files[name];
+    if (!e) return null;
+    const start = e.local + 30 + dv.getUint16(e.local + 26, true) + dv.getUint16(e.local + 28, true);
+    const data = u8.subarray(start, start + e.csize);
+    if (e.method === 0) return dec.decode(data);
+    const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+    return await new Response(stream).text();
+  };
+}
+
+async function readXlsx(buf) {
+  const get = await unzip(buf);
+  const xml = (s) => new DOMParser().parseFromString(s, 'application/xml');
+  const byTag = (doc, tag) => [...doc.getElementsByTagNameNS('*', tag)];
+
+  // 1ª aba de verdade (workbook -> rels)
+  let sheetPath = 'xl/worksheets/sheet1.xml';
+  const wb = await get('xl/workbook.xml'), rels = await get('xl/_rels/workbook.xml.rels');
+  if (wb && rels) {
+    const first = byTag(xml(wb), 'sheet')[0];
+    const rid = first && (first.getAttribute('r:id') || [...first.attributes].find((a) => a.localName === 'id')?.value);
+    const rel = byTag(xml(rels), 'Relationship').find((r) => r.getAttribute('Id') === rid);
+    if (rel) { const t = rel.getAttribute('Target'); sheetPath = t.startsWith('/') ? t.slice(1) : 'xl/' + t.replace(/^\.\//, ''); }
+  }
+
+  const ssXml = await get('xl/sharedStrings.xml');
+  const shared = ssXml ? byTag(xml(ssXml), 'si').map((si) => byTag(si, 't').map((t) => t.textContent).join('')) : [];
+
+  // estilos de data (numFmt 14-22, 45-47 ou formato com d/m/y/h)
+  const dateStyles = new Set();
+  const stXml = await get('xl/styles.xml');
+  if (stXml) {
+    const st = xml(stXml);
+    const custom = {};
+    byTag(st, 'numFmt').forEach((f) => (custom[f.getAttribute('numFmtId')] = f.getAttribute('formatCode') || ''));
+    const cellXfs = byTag(st, 'cellXfs')[0];
+    if (cellXfs) [...cellXfs.children].forEach((xf, i) => {
+      const id = Number(xf.getAttribute('numFmtId'));
+      const code = (custom[id] || '').replace(/"[^"]*"|\[[^\]]*\]/g, '');
+      if ((id >= 14 && id <= 22) || (id >= 45 && id <= 47) || /[dmyh]/i.test(code)) dateStyles.add(i);
+    });
+  }
+  const pad = (n) => String(n).padStart(2, '0');
+  const serialToText = (v) => {
+    const d = new Date(Math.round((v - 25569) * 864e5));
+    return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+  };
+  const colIdx = (ref) => { let n = 0; for (const ch of ref.replace(/\d+/g, '')) n = n * 26 + (ch.charCodeAt(0) - 64); return n - 1; };
+
+  const sheet = await get(sheetPath);
+  if (!sheet) throw new Error('planilha vazia');
+  const rows = [];
+  for (const r of byTag(xml(sheet), 'row')) {
+    const ri = Number(r.getAttribute('r')) - 1;
+    const row = [];
+    for (const c of byTag(r, 'c')) {
+      const t = c.getAttribute('t'), s = Number(c.getAttribute('s') || 0);
+      const v = byTag(c, 'v')[0]?.textContent ?? '';
+      let val;
+      if (t === 's') val = shared[Number(v)] ?? '';
+      else if (t === 'inlineStr') val = byTag(c, 't').map((x) => x.textContent).join('');
+      else if (t === 'b') val = v === '1' ? 'TRUE' : 'FALSE';
+      else if (t === 'str' || t === 'e') val = v;
+      else if (v !== '' && dateStyles.has(s)) val = serialToText(Number(v));
+      else val = v;
+      row[c.getAttribute('r') ? colIdx(c.getAttribute('r')) : row.length] = val;
+    }
+    rows[Number.isFinite(ri) && ri >= 0 ? ri : rows.length] = Array.from(row, (x) => x ?? '');
+  }
+  return rows.filter((r) => r && r.some((c) => String(c).trim() !== ''));
+}
+
 function bindImport() {
   $$('#imp-platform button').forEach((b) => (b.onclick = () => {
     imp.platform = b.dataset.v;
@@ -564,12 +656,23 @@ function bindImport() {
   $('#imp-file').onchange = async (e) => {
     const f = e.target.files[0];
     if (!f) return;
-    if (/\.xlsx?$/i.test(f.name)) { toast('Arquivo em Excel', 'Salve como CSV e suba de novo', true); return; }
-    let text = await f.text();
-    if (text.includes('\uFFFD')) text = new TextDecoder('windows-1252').decode(await f.arrayBuffer());
-    const all = parseCsvText(text);
-    imp.headers = all[0] || [];
-    imp.rows = all.slice(1);
+    let all;
+    try {
+      if (/\.xlsx$/i.test(f.name)) all = await readXlsx(await f.arrayBuffer());
+      else if (/\.xls$/i.test(f.name)) { toast('Excel antigo (.xls)', 'Salve como .xlsx ou CSV e suba de novo', true); return; }
+      else {
+        let text = await f.text();
+        if (text.includes('\uFFFD')) text = new TextDecoder('windows-1252').decode(await f.arrayBuffer());
+        all = parseCsvText(text);
+      }
+    } catch (err) {
+      toast('N\u00E3o consegui ler o arquivo', err.message, true);
+      return;
+    }
+    // cabe\u00E7alho = primeira linha com 2+ c\u00E9lulas preenchidas
+    const h = all.findIndex((r) => r.filter((c) => String(c ?? '').trim()).length >= 2);
+    imp.headers = (all[h] || []).map((c) => String(c ?? '').trim());
+    imp.rows = all.slice(h + 1);
     imp.map = detectMap(imp.headers);
     renderImportPreview();
   };
